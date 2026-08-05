@@ -1,0 +1,10 @@
+# core - order book and simulation
+sortedcontainers>=2.4
+numpy>=2.5
+
+# analysis (Phase 4)
+pandas>=2.2
+matplotlib>=3.9
+
+# testing
+pytest>=8.0

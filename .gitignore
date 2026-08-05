@@ -1,0 +1,27 @@
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# virtual environments
+.venv/
+venv/
+env/
+
+# testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# notebooks
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# data (large replay files - keep these out of git)
+data/
+*.csv
+*.parquet

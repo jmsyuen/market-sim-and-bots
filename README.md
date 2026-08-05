@@ -8,7 +8,7 @@ matching engine
 prediction market - market resolves to a ground truth
 
 simulated traders and price over stochastic process
-market maker bot - arbitrage logic in pred market 
+market maker bot - arbitrage logic in prediction market 
     markout analysis - measure adverse selection, calibration/coherence analysis shows trader's judgement
     
 
@@ -19,9 +19,15 @@ market maker bot - arbitrage logic in pred market
 
 ## bot
 logic:
-core loop is the same as any MM, to profit from noise: estimate fair value, quote a bid below it and an ask above it, manage inventory, requote as things change
+core loop is the same as any MM, to profit from noise: estimate fair value, manage inventory with skew, requote as things change with bayesian updating, scale spread with volatility
 quoted spread must cover fees, expected adverse selection, inventory-risk premium, (venue fees)
+
+Bayesian fair value → where the centre of your quote sits
+Volatility-scaled spread → how wide you quote around it
+Inventory skew → how far you shift off centre given the position you're holding
+
 resolution jump risk - widen spreads or pull quotes near resolution and news events
+
 2 edges:
 1. informational edge knowing true prob better than market
 2. liquidity compensation - spread is a fee you're paid for a service, providing immediacy and bearing inventory and adverse-selection risk of holding other side
@@ -36,6 +42,7 @@ Steps to build fair value model:
 2. set a prior
 3. define update rule - bayesian update or weighted blend of these signals, use posterior mean model, output probability
 4. validate with brier/log loss against ground truth - on simulated data and real data (need fill model)
+
 
 
 encapsulated feature toggles (to test each one and results)
@@ -70,6 +77,8 @@ spread captured by providing liquidity risks filling to informed flow
 
 prediction vs exchange - prediction slower, python could compete, but harder to profit: thin liquidity, events idiosyncratic (specific) so less statistical regularity to exploit, real edge often needs domain forecasting (politics, sports)
 
+the posterior mean minimises expected squared error, which is what Brier score measures.
+
 
 also design a visualiser with best price?
 
@@ -98,37 +107,3 @@ posterior mean - a point estimate after observing data, between prior beliefs an
 (weights determined by the precision (inverse variance) or effective sample size of the prior and the data)
 In the clean conjugate-normal case: posterior mean = (μ_prior/σ²_prior + μ_evidence/σ²_evidence) / (1/σ²_prior + 1/σ²_evidence)
 
-
-# ask claude when online
-explain enums, why not just bools 
-explain dataclasses python, why not use sql and is it more convenient, does it just hold data records in a python file
-explain the mapping concept
-explain resting orders
-explain why we are separating python files like order and trade, will they contain methods later
-quick refresh on limit order, market order
-explain how we upgrade to o(1) for the cancel function with double linked list
-
-give me the most important information a typical quant trader has to trade with, can they typically access the whole order book and see for example the price and volume at each level.
-
-
-what can i add to this project to make it impressive and stand out on my cv, to increase my chances of impressing a top quant firm for a trader role?
-
-project for quant prep
-
-
-
-program an application replicating a trading simulator of a market eg representing oil market, displaying order book and price levels much like one at a quant firm would use to test its interns, with news updates and other bot traders with the price displayed matching incoming trades. allow the user to place trades that will influence the price, for now no limit on direction or inventory. include varieties of bots, but mostly the competent ones trade around a fair value estimate, of which they narrow down over time using the news updates, starting very vague.
-in this mode for now there is one 'true' value that is resolved at the end of the trading session lets say 5 mins, in later modes this true value will be moving like a real market but slower.
-
-also program a feature to toggle to show hints when i should trade and why, explaining the techniques and reasoning behind the trade. 
-
-
-
-can we trade pair volatility spread of any two instruments in the dataset?
-
-
-
-
-i'll be offline again today, reference the other chat where i talk about making a prediction market as a project or lead on instead, and just like the current project give me a structural overview of the files and components that i would need to have to make this possible, as well as a breakdown of what i will need to build and walk me through possible design decisions and reasoning behind it so i can explore my options
-can you tell me what i should start on and the framework with an outline of pseudocode for me to reference as i want to try to make this myself, also how long are the files roughly going to be on a scale of 1-10 and make the frameworks comphrehensive
-also make a guid to explain all of the concepts that i need to know to build this

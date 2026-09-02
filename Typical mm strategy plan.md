@@ -112,3 +112,24 @@ you buy high sell low at current price
 
 limit order -  limit price willing to trade at, fok
 market order - specified quantity through multiple levels, not recommended by optiver
+
+
+
+
+
+# My strategy from Da Vinci OA
+bear in mind the setup was different: rfq, no fees, dataset available, no depth information, trade happens within 0.15 of market mid price
+
+2 parts:
+fair value model
+quoting strategy
+
+data analysis on the given dataset, test variety of strategies on this, using half of the data as in sample then test on second half as out of sample to bring out overfitted parameters - settled with ema30s over lead lag
+
+counter adverse selection:
+inventory skew - off centre quotes when taking directional risk
+volatility scaled spread - widen with sharp moves
+monitor for adverse selection, watch the moves of market and trades with you post-fill execution, can counter by stopping inventory skew and widen spread to discourage trades
+no related instruments, so no hedging possible
+
+test both sets of parameters, but optimise for robustness instead of overfitting parameters

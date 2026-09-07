@@ -37,12 +37,18 @@ class OrderBook:
         self.bids = SortedDict()  # best bid = LARGEST key  -> peekitem(-1)
         self.asks = SortedDict()  # best ask = SMALLEST key -> peekitem(0)
 
-        # order_id -> (side, price). without this, cancel would scan every
-        # level of both sides to find the order.
-        self.locations: dict[int, tuple[Side, int]] = {}
-
-        # order_id -> Order, for every order currently resting. used to reject
-        # duplicate ids and to let the strategy layer inspect its own quotes.
+        # order_id -> Order, for every order currently resting. this is the
+        # ONLY index: it rejects duplicate ids, gives cancel the object it needs
+        # to splice out of the deque, and carries .side and .price so the level
+        # can be located without a second lookup table.
+        #
+        # a separate {id -> (side, price)} map was considered and dropped: it
+        # stores nothing this doesn't already hold, doubles the writes on _rest
+        # and _remove, and buys no asymptotic win (you still scan the deque).
+        # the structure that DOES buy O(1) cancel is {id -> linked-list node},
+        # and that replaces this dict rather than sitting alongside it.
+        # reverse this only for an amend that changes price while KEEPING queue
+        # position; standard amend semantics don't need it.
         self.resting: dict[int, Order] = {}
 
         # every fill this book has produced, in sequence order. the analysis
@@ -132,14 +138,14 @@ class OrderBook:
         # book = self._book_for(order.side)
         # create the deque if this price level does not exist yet
         # append to the BACK (newest = last in the FIFO queue)
-        # record self.locations[order.id] and self.resting[order.id]
+        # record self.resting[order.id] = order
         ...
 
     def _remove(self, order: Order) -> None:
         # the single exit path for a resting order — both cancel() and a
         # complete fill route through here, so level cleanup can't diverge.
         # remove from the deque, DROP THE PRICE KEY IF THE LEVEL IS NOW EMPTY,
-        # then drop from self.locations and self.resting.
+        # then drop from self.resting.
         #
         # dropping the empty level is the step that gets forgotten: a stale
         # empty deque makes best_bid report a price with no size behind it,
@@ -263,8 +269,9 @@ class OrderBook:
         #   1. not crossed:  best_bid < best_ask whenever both sides exist
         #   2. no empty levels on either side
         #   3. every resting order's remaining > 0
-        #   4. self.locations and self.resting agree with the deques exactly
-        #      (same id set, and each id's recorded price matches its level)
+        #   4. self.resting agrees with the deques exactly: same id set, the
+        #      object in the deque IS the object in self.resting, and each
+        #      order sits in the level its own .price names
         #   5. bid levels only hold BUY orders, ask levels only SELL
         # share conservation is NOT here — it spans the book and the traders,
         # so it belongs in the fuzz test itself.

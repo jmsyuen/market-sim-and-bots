@@ -2,7 +2,7 @@
 sortedcontainers>=2.4
 numpy>=2.5
 
-# analysis (Phase 4)
+# analysis
 pandas>=2.2
 matplotlib>=3.9
 

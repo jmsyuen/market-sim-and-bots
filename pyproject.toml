@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# run pytest from the repo root and `from src.orderbook.order import Order`
+# resolves. without this, pytest puts the tests/ directory on sys.path and
+# not the repo root, so src/ is invisible.
+pythonpath = ["."]
+testpaths = ["tests"]

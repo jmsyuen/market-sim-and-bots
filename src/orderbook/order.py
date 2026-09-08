@@ -20,11 +20,12 @@ class Side(Enum):
 
     @property
     def sign(self) -> int:
-        # +1 for BUY, -1 for SELL. one place to define direction, used by
-        # inventory skew, P&L, and markout: signed_move = sign * (mid - price).
-        # avoids re-deriving `if side is BUY ... else ...` at every call site,
-        # which is how sign-flip bugs get in.
-        return 1 if self is Side.BUY else -1
+        # used by strategies later: inventory skew, P&L, and markout
+        if self is Side.BUY:
+            return 1 
+        else:
+            return -1
+        
 
 class OrderType(Enum):
     LIMIT = 1       # fill on this price only, never worse, allows partial fills

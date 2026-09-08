@@ -1,7 +1,6 @@
 # central limit order book with price-time priority matching
 #
-# venue-agnostic: a CLOB is a CLOB. prediction-market specifics (complementary
-# YES/NO tokens, resolution to 0/1) live in market/contract.py, NOT here.
+# prediction-market specifics (complementary YES/NO tokens, resolution to 0/1) live in market/contract.py, not here
 
 from collections import deque
 from itertools import count
@@ -34,8 +33,10 @@ class OrderBook:
         # popleft the oldest as it fills — both O(1). weakness is O(n) removal
         # from the middle, which is what cancel does; documented upgrade path
         # is an intrusive doubly-linked list + {id -> node} for O(1) cancel.
+
         self.bids = SortedDict()  # best bid = LARGEST key  -> peekitem(-1)
         self.asks = SortedDict()  # best ask = SMALLEST key -> peekitem(0)
+        # best_price, level
 
         # order_id -> Order, for every order currently resting. this is the
         # ONLY index: it rejects duplicate ids, gives cancel the object it needs
@@ -57,34 +58,47 @@ class OrderBook:
         # construction site and every test that reads trades.
         self.trades: list[Trade] = []
 
-        self._seq_source = seq_source if seq_source is not None else _GLOBAL_SEQ
+        if seq_source is not None:
+            self._seq_source = seq_source
+        else:
+            self._seq_source = _GLOBAL_SEQ
+        
 
     # ------------------------------------------------------------------
     # internals: sequence + side selection
     # ------------------------------------------------------------------
 
     def _next_seq(self) -> int:
-        # next(self._seq_source)
-        # a monotonic integer, NOT a timestamp. in a discrete-event sim many
-        # events share one virtual time, so timestamps collide and FIFO order
-        # goes ambiguous. physical time is a separate concept and arrives
-        # stamped from outside, on Trade.time.
-        ...
+        # a monotonic integer, not a timestamp.
+        return next(self._seq_source)
+        
 
     def _book_for(self, side: Side) -> SortedDict:
-        # the side an order of this `side` RESTS on: BUY -> self.bids
-        ...
-
+        if side is Side.BUY:
+            return self.bids
+        else:
+            return self.asks
+        
     def _book_against(self, side: Side) -> SortedDict:
-        # the side an order of this `side` MATCHES against: BUY -> self.asks
-        # implement as self._book_for(side.opposite) — one source of truth
-        ...
+        return self._book_for(side.opposite)
+        
 
     def _best_of(self, book: SortedDict) -> int | None:
         # peekitem(0)[0] for asks (lowest), peekitem(-1)[0] for bids (highest).
         # None if empty. decide by identity (`book is self.asks`) so this
         # helper works for either side without a Side argument.
-        ...
+        if len(book) == 0:
+            return None
+
+        # book in ascending prices
+        if book is self.asks:
+            best_price = book.peekitem(0)[0]     # lowest ask
+        else:
+            best_price = book.peekitem(-1)[0]    # highest bid
+
+        return best_price
+
+        
 
     # ------------------------------------------------------------------
     # accessors — read-only views of book state
@@ -92,87 +106,162 @@ class OrderBook:
 
     @property
     def best_bid(self) -> int | None:
-        ...
+        return self._best_of(self.bids)
 
     @property
     def best_ask(self) -> int | None:
-        ...
+        return self._best_of(self.asks)
 
     @property
     def mid(self) -> float | None:
-        # (best_bid + best_ask) / 2, None if either side empty.
-        # NOTE: a float, unlike every price in this file. it is a derived
-        # statistic, never a matchable price, so it never enters the book.
-        ...
+        bid, ask = self.best_bid, self.best_ask
+
+        if bid is None or ask is None:
+            return None
+
+        return (bid + ask) / 2  # float as derived stat, doesn't enter book
 
     @property
     def spread(self) -> int | None:
         # best_ask - best_bid, None if either side empty
-        ...
+        bid, ask = self.best_bid, self.best_ask
+
+        if bid is None or ask is None:
+            return None
+
+        return ask - bid
+        
 
     @property
     def micro_price(self) -> float | None:
-        # book-derived fair value using top-of-book imbalance:
+        # book-derived fair value using top-of-book imbalance, ie. interpolation:
         #   I     = Q_bid / (Q_bid + Q_ask)     Q_* = total size at best bid/ask
         #   micro = best_bid + I * spread       ( = I*ask + (1-I)*bid )
         # heavy bids -> I near 1 -> fair value sits near the ask.
-        # None if either side empty.
-        ...
+        
+        bid, ask = self.best_bid, self.best_ask
+
+        if bid is None or ask is None:
+            return None
+        
+        bid_size = self.size_at(Side.BUY, bid)
+        ask_size = self.size_at(Side.SELL, ask)
+
+        imbalance = bid_size / (bid_size + ask_size)
+        micro = bid + imbalance * (ask - bid)
+        return micro
+        
 
     def size_at(self, side: Side, price: int) -> int:
-        # sum of `remaining` over the deque at that price; 0 if no level.
-        # feeds micro_price and depth, and lets tests assert on level size
-        # without reaching into self.bids directly.
-        ...
+        # get quantity at price level without reaching into self.bids directly
+        book = self._book_for(side)
+
+        if price not in book:
+            return 0
+        
+        level = book[price]
+        total = 0
+
+        for order in level:
+            total += order.remaining
+        return total
+        
 
     def depth(self, levels: int = 5) -> dict[Side, list[tuple[int, int]]]:
-        # [(price, total_remaining), ...] best-first, for each side.
-        # analysis/plotting only — nothing in the matching path uses it.
-        ...
+        # for analysis/plotting only
+        bid_levels, ask_levels = [], []
+        taken = 0
+        for price in reversed(self.bids):   #reversed as descending
+            if taken >= levels:
+                break
+            bid_levels.append((price, self.size_at(Side.BUY, price)))
+            taken += 1
+
+        taken = 0
+        for price in self.asks:
+            if taken >= levels:
+                break
+            ask_levels.append((price, self.size_at(Side.SELL, price)))
+            taken += 1
+
+        return {Side.BUY: bid_levels, Side.SELL: ask_levels}
 
     # ------------------------------------------------------------------
     # internals: resting and removing
     # ------------------------------------------------------------------
 
     def _rest(self, order: Order) -> None:
-        # book = self._book_for(order.side)
-        # create the deque if this price level does not exist yet
-        # append to the BACK (newest = last in the FIFO queue)
-        # record self.resting[order.id] = order
-        ...
+        
+        book = self._book_for(order.side)
+        if order.price not in book:
+            book[order.price] = deque() # create deque if this price level does not exist yet
+
+        book[order.price].append(order) # FIFO order
+        self.resting[order.id] = order
+        
 
     def _remove(self, order: Order) -> None:
-        # the single exit path for a resting order — both cancel() and a
-        # complete fill route through here, so level cleanup can't diverge.
-        # remove from the deque, DROP THE PRICE KEY IF THE LEVEL IS NOW EMPTY,
-        # then drop from self.resting.
-        #
-        # dropping the empty level is the step that gets forgotten: a stale
-        # empty deque makes best_bid report a price with no size behind it,
-        # which silently corrupts spread, micro_price, and every fill after.
-        ...
+        # remove resting order from price level, delete level if empty
+        book = self._book_for(order.side)
+        level = book[order.price]
+        level.remove(order)
+
+        if len(level) == 0:
+            del book[order.price]
+        del self.resting[order.id]
 
     # ------------------------------------------------------------------
     # internals: the matching walk — the load-bearing 30 lines
     # ------------------------------------------------------------------
 
     def _crosses(self, order: Order, resting_price: int) -> bool:
-        # does `order` want to trade at `resting_price`?
-        #   BUY  crosses when order.price >= resting_price
-        #   SELL crosses when order.price <= resting_price
+        # does the incoming order cross
         # MARKET orders (price is None) cross unconditionally -> True.
-        #
-        # named helper rather than the arithmetic form
-        # `order.side.sign * (order.price - resting_price) >= 0` on purpose:
-        # the sign trick is shorter but the reader has to derive it.
-        ...
+        # shorter form: order.side.sign * (order.price - resting_price) >= 0
+
+        if order.price is None:
+            return True
+
+        if order.side is Side.BUY:
+            return order.price >= resting_price
+        else:
+            return order.price <= resting_price
+
 
     def _available_quantity(self, order: Order) -> int:
-        # total size the order could fill against right now, without mutating
+        # total size the order could fill against right now, WITHOUT mutating
         # anything. only FOK needs this: it must know the answer BEFORE any
-        # fill happens, because a partial fill it then has to unwind is not
-        # something this design supports.
-        ...
+        # fill happens, because a partial fill it would then have to unwind is
+        # not something this design supports.
+        against = self._book_against(order.side)
+
+        # best-first iteration differs by side: ascending keys for asks,
+        # descending for bids. getting this backwards makes FOK reject fillable
+        # orders, intermittently and silently.
+        # a plain `for` is safe here only because nothing in this method mutates.
+        if against is self.asks:
+            prices = against.keys()
+        else:
+            prices = reversed(against)
+
+        total = 0
+        for price in prices:
+            if not self._crosses(order, price):
+                break
+
+            for resting in against[price]:
+                # same-owner orders are CANCELLED by the STP branch in _match,
+                # not filled, so they are not available depth. counting them
+                # would let an FOK pass this check and then under-fill, which
+                # is exactly the outcome FOK exists to prevent.
+                if resting.trader_id is not None and resting.trader_id == order.trader_id:
+                    continue
+                total += resting.remaining
+
+            if total >= order.quantity:
+                break       # enough found; the true total is never needed
+
+        return total
 
     def _match(self, order: Order) -> list[Trade]:
         """Walk the opposite side, filling while the order crosses.
@@ -180,84 +269,103 @@ class OrderBook:
         POSTCONDITION: no crossed book — on return, either order.remaining == 0,
         or the best opposite price no longer crosses order.price.
         """
-        # trades: list[Trade] = []
-        # against = self._book_against(order.side)
-        #
-        # while order.remaining > 0 and against:
-        #     best_price = self._best_of(against)
-        #     if not self._crosses(order, best_price): break
-        #
-        #     level = against[best_price]
-        #     resting = level[0]                  # FRONT = oldest = time priority
-        #
-        #     # self-trade prevention: same owner on both sides of the fill.
-        #     # cancel the RESTING order and continue the walk (cancel-oldest),
-        #     # rather than rejecting the incoming order. keeps the aggressor's
-        #     # intent intact and matches how most venues default.
-        #     if resting.trader_id is not None and resting.trader_id == order.trader_id:
-        #         self._remove(resting)
-        #         continue
-        #
-        #     quantity = min(order.remaining, resting.remaining)
-        #
-        #     # trade prints at the RESTING order's price, never the incoming
-        #     # order's. the resting order set the terms; the aggressor accepted
-        #     # them. this is where the maker earns the spread.
-        #     trade = Trade(
-        #         price=best_price,
-        #         quantity=quantity,
-        #         maker_id=resting.id,
-        #         taker_id=order.id,
-        #         seq=self._next_seq(),
-        #         taker_side=order.side,
-        #     )
-        #
-        #     order.fill(quantity)                # Order.fill owns the
-        #     resting.fill(quantity)              # remaining >= 0 invariant
-        #
-        #     if resting.is_filled: self._remove(resting)
-        #
-        #     trades.append(trade)
-        #     self.trades.append(trade)
-        #
-        # return trades
-        ...
+        trades: list[Trade] = []
+        against = self._book_against(order.side)
+
+        # exit conditions
+        while order.remaining > 0 and len(against) > 0:
+            best_price = self._best_of(against)
+
+            if not self._crosses(order, best_price):
+                break
+
+            level = against[best_price]
+            resting = level[0]          # front is oldest
+
+            # self-trade prevention: same owner on both sides of the fill.
+            # cancel the RESTING order and continue the walk (cancel-oldest),
+            # rather than reject the incoming order. the aggressive order is
+            # a CURRENT intent; the resting one is stale, and killing the
+            # current intent to protect the stale one is backwards.
+            
+            if resting.trader_id is not None and resting.trader_id == order.trader_id:
+                self._remove(resting)
+                continue
+
+            # min of the two remainders, so at least one of the pair is fully
+            # filled every iteration, guarantees termination.
+            quantity = min(order.remaining, resting.remaining)
+
+            trade = Trade(
+                price=best_price,
+                quantity=quantity,
+                maker_id=resting.id,
+                taker_id=order.id,
+                seq=self._next_seq(),
+                taker_side=order.side,
+            )
+
+            order.fill(quantity)        # Order.fill owns the
+            resting.fill(quantity)      # remaining >= 0 invariant
+
+            # _remove, not level.popleft(): one exit path for a resting order,
+            # so the empty-level deletion can't diverge between here and cancel
+            if resting.is_filled:
+                self._remove(resting)
+
+            trades.append(trade)        # this call's fills
+            self.trades.append(trade)   # the book's whole history
+
+        return trades
 
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
 
     def submit(self, order: Order) -> list[Trade]:
-        """The single entry point. Match what crosses, then apply the TIF.
+        """The single entry point. Match crossed orders then apply the TIF.
 
         One method rather than add_limit_order + add_market_order: the Order
         already carries `type` and `tif`, so letting the caller pick a method
         duplicates that information and lets the two disagree.
         """
-        # reject a duplicate id (an id already in self.resting) — a silent
-        # overwrite would orphan the old order inside its deque forever
-        #
-        # assign order.seq = self._next_seq()   # time priority, on arrival
-        #
-        # FOK: check self._available_quantity(order) >= order.quantity FIRST;
-        #      if not, return [] having touched nothing
-        #
-        # trades = self._match(order)
-        #
-        # then decide the fate of any remainder:
-        #   GTC + LIMIT and order.remaining > 0  -> self._rest(order)
-        #   IOC, FOK, or MARKET                  -> discard the remainder
-        #                                           (nothing to clean up — an
-        #                                            unmatched order was never
-        #                                            in the book)
-        # return trades
-        ...
+        if order.id in self.resting:
+            raise ValueError(f"duplicate order id {order.id} already resting")
+
+        # time priority is set by ARRIVAL, so this is stamped before matching.
+        # an order that sweeps two levels and then rests keeps the queue
+        # position it earned on arrival, not a worse one earned afterwards.
+        order.seq = self._next_seq()
+
+        # FOK is all-or-nothing and _match has no undo — it fills orders,
+        # deletes levels and appends trades as it goes. so the decision has to
+        # be made before a single fill happens.
+        if order.tif is TimeInForce.FOK:
+            available = self._available_quantity(order)
+            if available < order.quantity:
+                return []       # touched nothing: no fills, no book changes
+
+        trades = self._match(order)
+
+        # only GTC rests a remainder. IOC and FOK discard it, and MARKET can
+        # never be GTC because Order.__post_init__ rejects that combination —
+        # so testing tif alone is sufficient here. nothing to clean up either:
+        # an unmatched incoming order was never in the book.
+        if order.remaining > 0 and order.tif is TimeInForce.GTC:
+            self._rest(order)
+
+        return trades
 
     def cancel(self, order_id: int) -> bool:
-        # look up self.resting, hand it to self._remove, return True.
-        # return False (do not raise) if the id isn't resting: in a live
-        # system a cancel racing a fill is normal, not an error.
-        ...
+        # usually racing a fill, so no error if doesn't exist
+        
+        if order_id not in self.resting:
+            return False
+
+        order = self.resting[order_id]
+        self._remove(order)
+
+        return True
 
     # ------------------------------------------------------------------
     # invariants — called by the fuzz suite after every operation
@@ -266,13 +374,65 @@ class OrderBook:
     def assert_invariants(self) -> None:
         # lives on the book, not in tests, so the fuzz loop is a few lines and
         # every invariant has exactly one definition.
-        #   1. not crossed:  best_bid < best_ask whenever both sides exist
-        #   2. no empty levels on either side
-        #   3. every resting order's remaining > 0
-        #   4. self.resting agrees with the deques exactly: same id set, the
-        #      object in the deque IS the object in self.resting, and each
-        #      order sits in the level its own .price names
-        #   5. bid levels only hold BUY orders, ask levels only SELL
-        # share conservation is NOT here — it spans the book and the traders,
-        # so it belongs in the fuzz test itself.
-        ...
+        # share conservation is NOT here — it spans the book and every order
+        # ever submitted, so it belongs in the fuzz test itself.
+
+        # 1. never crossed. strict <, because an equal best bid and ask is a
+        #    LOCKED book: _crosses uses >=, so a bid at 42 should already have
+        #    traded with an ask at 42.
+        bid = self.best_bid
+        ask = self.best_ask
+        if bid is not None and ask is not None:
+            assert bid < ask, f"crossed book: best bid {bid} >= best ask {ask}"
+
+        ids_found_in_levels = set()
+
+        for side in (Side.BUY, Side.SELL):
+            book = self._book_for(side)
+
+            for price in book:
+                level = book[price]
+
+                # 2. no empty levels. a stale empty deque makes _best_of report
+                #    a price with no size behind it, and _match then reaches
+                #    for level[0] and raises IndexError.
+                assert len(level) > 0, f"empty level at price {price} on {side}"
+
+                previous_seq = -1
+                for order in level:
+                    # 3. every resting order still has something to trade
+                    assert order.remaining > 0, (
+                        f"order {order.id} rests with remaining {order.remaining}"
+                    )
+
+                    # 4. the index agrees with the deques
+                    assert order.id in self.resting, (
+                        f"order {order.id} is in a level but not in self.resting"
+                    )
+                    assert self.resting[order.id] is order, (
+                        f"self.resting[{order.id}] is a different object"
+                    )
+                    assert order.price == price, (
+                        f"order {order.id} has price {order.price} "
+                        f"but sits in level {price}"
+                    )
+
+                    # 5. side purity
+                    assert order.side is side, (
+                        f"order {order.id} is {order.side} in the {side} book"
+                    )
+
+                    # 6. queue order: seq strictly increasing front to back.
+                    #    cheap, and catches priority corruption that no example
+                    #    test would.
+                    assert order.seq > previous_seq, (
+                        f"order {order.id} has seq {order.seq} behind {previous_seq}"
+                    )
+                    previous_seq = order.seq
+
+                    ids_found_in_levels.add(order.id)
+
+        # the other direction of invariant 4: nothing orphaned in the index
+        assert ids_found_in_levels == set(self.resting.keys()), (
+            "self.resting and the price levels hold different id sets"
+        )

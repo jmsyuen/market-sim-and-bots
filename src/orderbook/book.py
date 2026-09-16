@@ -2,12 +2,12 @@
 #
 # prediction-market specifics (complementary YES/NO tokens, resolution to 0/1) live in market/contract.py, not here
 
-from collections import deque
 from itertools import count
 
 from sortedcontainers import SortedDict
 
 from .order import Order, OrderType, Side, TimeInForce
+from .price_level import PriceLevel
 from .trade import Trade
 
 
@@ -22,17 +22,20 @@ class OrderBook:
     """One side-paired book of resting orders. Owns the never-crossed invariant."""
 
     def __init__(self, seq_source=None) -> None:
-        # tick -> deque[Order].
+        # tick -> PriceLevel.
         #
         # SortedDict: needs cheap best-price access AND cheap cancel of an
         # arbitrary order. a heap gives the first but removing an interior
         # element is O(n) bookkeeping — and in real flow cancels vastly
         # outnumber fills, so cancel is the operation to optimise for.
         #
-        # deque per level: a price level is FIFO. append newest at the back,
-        # popleft the oldest as it fills — both O(1). weakness is O(n) removal
-        # from the middle, which is what cancel does; documented upgrade path
-        # is an intrusive doubly-linked list + {id -> node} for O(1) cancel.
+        # PriceLevel per level: a price level is FIFO, and a PriceLevel is an
+        # intrusive doubly-linked list - append newest at the back, take the
+        # oldest as it fills, and remove from ANYWHERE, all O(1). it replaced a
+        # deque, which was O(1) at both ends but O(n) in the middle - and the
+        # middle is what a cancel usually is, so it was the common case rather
+        # than the edge case. see price_level.py for why the pointers live on
+        # Order rather than in wrapper nodes.
 
         self.bids = SortedDict()  # best bid = LARGEST key  -> peekitem(-1)
         self.asks = SortedDict()  # best ask = SMALLEST key -> peekitem(0)
@@ -40,7 +43,7 @@ class OrderBook:
 
         # order_id -> Order, for every order currently resting. this is the
         # ONLY index: it rejects duplicate ids, gives cancel the object it needs
-        # to splice out of the deque, and carries .side and .price so the level
+        # to splice out of the level, and carries .side and .price so the level
         # can be located without a second lookup table.
         #
         # a separate {id -> (side, price)} map was considered and dropped: it
@@ -194,7 +197,7 @@ class OrderBook:
         
         book = self._book_for(order.side)
         if order.price not in book:
-            book[order.price] = deque() # create deque if this price level does not exist yet
+            book[order.price] = PriceLevel() # create the level if this price is new
 
         book[order.price].append(order) # FIFO order
         self.resting[order.id] = order
@@ -280,7 +283,7 @@ class OrderBook:
                 break
 
             level = against[best_price]
-            resting = level[0]          # front is oldest
+            resting = level.front       # front is oldest
 
             # self-trade prevention: same owner on both sides of the fill.
             # cancel the RESTING order and continue the walk (cancel-oldest),
@@ -431,6 +434,45 @@ class OrderBook:
                     previous_seq = order.seq
 
                     ids_found_in_levels.add(order.id)
+
+                # 7. the linked list is intact in BOTH directions.
+                #    this is the only check that catches a remove() which
+                #    updates `next` but forgets `prev`, or the reverse: forward
+                #    iteration stays perfectly correct, so invariants 2-6 above
+                #    and every example test still pass while the backward chain
+                #    silently rots. O(1) cancel is only correct if the two
+                #    directions agree.
+                assert level.head.prev is None, (
+                    f"level {price} on {side}: head {level.head.id} has a prev"
+                )
+                assert level.tail.next is None, (
+                    f"level {price} on {side}: tail {level.tail.id} has a next"
+                )
+
+                forward_ids = []
+                for order in level:
+                    forward_ids.append(order.id)
+
+                backward_ids = []
+                node = level.tail
+                while node is not None:
+                    backward_ids.append(node.id)
+                    node = node.prev
+                backward_ids.reverse()
+
+                assert forward_ids == backward_ids, (
+                    f"level {price} on {side}: forward walk {forward_ids} "
+                    f"is not the reverse of the backward walk"
+                )
+
+                # 8. the cached count matches the chain it claims to count.
+                #    if it drifts, `if len(level) == 0` either deletes a live
+                #    level or keeps a dead one - and a dead level is invariant
+                #    2's IndexError waiting to happen.
+                assert level.count == len(forward_ids), (
+                    f"level {price} on {side}: count is {level.count} but "
+                    f"{len(forward_ids)} orders are chained"
+                )
 
         # the other direction of invariant 4: nothing orphaned in the index
         assert ids_found_in_levels == set(self.resting.keys()), (

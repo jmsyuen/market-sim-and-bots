@@ -53,6 +53,13 @@ class Order:
     remaining: int = field(init=False)      # derived, then mutated by fill()
     seq: int = field(init=False, default=0)  # time priority - assigned by the book
 
+    # intrusive doubly-linked list pointers, owned by PriceLevel. None whenever
+    # the order is not resting. this pair is why Order does NOT use slots=True.
+    # repr=False because prev/next form a cycle - dataclass's repr guard stops
+    # it recursing forever, but the output would be an unreadable wall.
+    prev: "Order | None" = field(init=False, default=None, repr=False)
+    next: "Order | None" = field(init=False, default=None, repr=False)
+
     def __post_init__(self) -> None:
         # validate - reject nonsense at construction, not mid-match:
         self.remaining = self.quantity

@@ -4,3 +4,8 @@
 # not the repo root, so src/ is invisible.
 pythonpath = ["."]
 testpaths = ["tests"]
+
+# `slow` must be registered or pytest warns on the marker. addopts excludes it
+# by default, so `pytest` is the fast suite and `pytest -m slow` is the 2M run.
+markers = ["slow: long-running fuzz; run with -m slow"]
+addopts = "-m 'not slow'"

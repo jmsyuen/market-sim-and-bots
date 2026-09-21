@@ -50,16 +50,28 @@ class ValueProcess:
     # ------------------------------------------------------------------
 
     def _logit(self, p: float) -> float:
-        # ln(p / (1 - p)). maps (0,1) -> (-inf, +inf): the log-odds.
-        # called ONCE, in __init__. never on the hot path.
-        ...
+        """ln(p / (1 - p)). Maps (0,1) -> (-inf, +inf): the log-odds.
+
+        Called ONCE, in __init__. Never on the hot path, so clarity beats speed.
+
+        No input guard on purpose. The only caller passes p0, a value we control.
+        If p is ever 0, 1, or outside (0,1), something upstream is wrong and the
+        ZeroDivisionError / ValueError is the signal we want, not a clamp that
+        hides it.
+        """
+        return math.log(p / (1.0 - p))
 
     def _sigmoid(self, x: float) -> float:
-        # 1 / (1 + exp(-x)). the inverse.
-        #
-        # math.exp(-x) overflows for x around -745. if that ever bites, branch
-        # on the sign of x and use exp(x) / (1 + exp(x)) when x < 0.
-        ...
+        """1 / (1 + exp(-x)). The inverse of _logit.
+
+        Hot path: called on every read of self.p.
+
+        math.exp(-x) overflows for x around -745. The walk will not reach that
+        at sane vol, so no branch here. If it ever bites, use
+        exp(x) / (1 + exp(x)) when x < 0 - algebraically identical, and the
+        exponent is negative in both halves so neither overflows.
+        """
+        return 1.0 / (1.0 + math.exp(-x))
 
     # ------------------------------------------------------------------
     # reading the value

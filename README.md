@@ -107,3 +107,4 @@ posterior mean - a point estimate after observing data, between prior beliefs an
 (weights determined by the precision (inverse variance) or effective sample size of the prior and the data)
 In the clean conjugate-normal case: posterior mean = (μ_prior/σ²_prior + μ_evidence/σ²_evidence) / (1/σ²_prior + 1/σ²_evidence)
 
+

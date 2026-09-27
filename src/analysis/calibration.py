@@ -1,90 +1,111 @@
 '''
 Scoring forecasts against resolved outcomes.
 
-This is the file that justifies choosing a prediction market over equities.
-An equity simulator cannot do this at all: there is no terminal truth to score
-against. Here every market resolves to 0 or 1, so a forecast can be graded.
+This file is why the project is a PREDICTION market and not an equity
+simulator: an equity has no terminal truth to score against, so "was the price
+right?" is unanswerable. Here every market resolves to 0 or 1.
 
-THE PUNCHLINE, and the only result that matters from this file: score the
-MARKET'S implied probability and YOUR fair value over the same set of resolved
-markets. Lower Brier or log loss than the market is measured edge, not a
-backtest curve that could be luck.
+THE PUNCHLINE: score the MARKET'S implied probability and YOUR fair value over
+the same resolved markets. Lower Brier or log loss than the market is measured
+edge, not a backtest curve that could be luck.
 
-Everything here takes probabilities in (0,1), not ticks. Divide by 100 at the
-boundary and keep this file unit-free.
+Everything here is in PROBABILITY, not ticks. Convert at the boundary.
 '''
 
 import math
 
-# log loss is infinite at p = 0 or 1, and a maker quoting 1 tick produces
-# exactly that. Clip rather than crash - and report how often clipping bit,
-# because a model that needs heavy clipping is badly calibrated at the tails.
+# log loss is infinite at 0 or 1, and a maker quoting 1 tick produces exactly
+# that. Clip rather than crash.
 EPSILON = 1e-9
 
 
 def brier(probabilities, outcomes):
     '''
-    mean((p - outcome)^2). Lower is better, range 0 to 1.
+    mean((p - outcome)^2). Lower is better, 0 to 1.
 
-    A constant forecast of the base rate scores base_rate * (1 - base_rate),
-    so 0.25 at p = 0.5. That is the number to beat; anything above it is worse
+    A constant forecast of the base rate scores base_rate * (1 - base_rate), so
+    0.25 at p = 0.5. That is the number to beat: anything above it is worse
     than saying "I don't know".
     '''
-    ...
+    total = 0.0
+    count = 0
+    for probability, outcome in zip(probabilities, outcomes):
+        total += (probability - outcome) ** 2
+        count += 1
+    if count == 0:
+        return None
+    return total / count
 
 
 def log_loss(probabilities, outcomes, epsilon=EPSILON):
     '''
-    -mean(o * ln(p) + (1 - o) * ln(1 - p)).
+    -mean(o*ln(p) + (1-o)*ln(1-p)).
 
-    Punishes confident wrongness far harder than Brier does. Report both: a
-    model that beats the market on Brier but loses on log loss is making a few
+    Punishes confident wrongness far harder than Brier. Report both: a model
+    that beats the market on Brier but loses on log loss is making a few
     catastrophic calls, which for a trader is the more important fact.
     '''
-    ...
+    total = 0.0
+    count = 0
+    for probability, outcome in zip(probabilities, outcomes):
+        clipped = probability
+        if clipped < epsilon:
+            clipped = epsilon
+        if clipped > 1.0 - epsilon:
+            clipped = 1.0 - epsilon
+
+        if outcome == 1:
+            total += -math.log(clipped)
+        else:
+            total += -math.log(1.0 - clipped)
+        count += 1
+    if count == 0:
+        return None
+    return total / count
+
+
+def base_rate_benchmark(outcomes):
+    '''
+    The Brier score of always forecasting the observed base rate. Every other
+    number in this file is only meaningful next to it.
+    '''
+    count = len(outcomes)
+    if count == 0:
+        return None
+    rate = sum(outcomes) / count
+    return rate * (1.0 - rate)
+
+
+def score(probabilities, outcomes):
+    return {
+        "brier": brier(probabilities, outcomes),
+        "log_loss": log_loss(probabilities, outcomes),
+        "n": len(outcomes),
+    }
 
 
 def reliability(probabilities, outcomes, bins=10):
     '''
-    DEFERRED - not needed today. No CV bullet mentions a reliability curve, and
-    Brier plus log loss carry the claim on their own. Build it when the plots
-    go into the README.
+    Bin forecasts and compare predicted to realised frequency. Empty bins are
+    omitted: a bin with two observations is noise, and plotted naively it looks
+    like a calibration failure.
 
-    Bin the forecasts and compare predicted to realised frequency.
-
-    Returns a list of (bin_centre, mean_predicted, empirical_frequency, count)
-    with EMPTY BINS OMITTED - a bin with two observations is noise, and plotted
-    naively it looks like a calibration failure.
-
-    Plot against the diagonal. Flatter than the diagonal means overconfident:
-    the things called 90% only happen 70% of the time.
+    Flatter than the diagonal means overconfident - the things called 90% only
+    happen 70% of the time.
     '''
-    ...
+    buckets = {}
+    for probability, outcome in zip(probabilities, outcomes):
+        index = int(probability * bins)
+        if index == bins:
+            index = bins - 1
+        if index not in buckets:
+            buckets[index] = []
+        buckets[index].append((probability, outcome))
 
-
-def score_run(predictions, outcomes):
-    '''
-    Convenience: both scores plus the base-rate benchmark, as one dict.
-    '''
-    ...
-
-
-def collect(build_engine, seeds, fee_per_contract=0.0):
-    '''
-    Run one market per seed and collect (prediction, outcome) pairs.
-
-    ONE MARKET GIVES ONE OUTCOME. A reliability curve needs a few hundred
-    independent resolved markets, so this loop is not optional - it is the
-    whole reason calibration works at all.
-
-    build_engine(seed) -> a fresh SimEngine. Vary p0 across seeds as well, or
-    every prediction clusters near 0.5 and the reliability curve has one
-    populated bin.
-
-    The prediction is the reference (micro_price / 100) at the LAST snapshot
-    before decision_time - not the final row, which is post-resolution and
-    would be 0 or 1. Scoring that would give a perfect Brier and mean nothing.
-
-    Returns (predictions, outcomes) ready for the functions above.
-    '''
-    ...
+    rows = []
+    for index in sorted(buckets):
+        pairs = buckets[index]
+        mean_predicted = sum(p for p, _ in pairs) / len(pairs)
+        frequency = sum(o for _, o in pairs) / len(pairs)
+        rows.append(((index + 0.5) / bins, mean_predicted, frequency, len(pairs)))
+    return rows

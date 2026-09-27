@@ -40,8 +40,13 @@ def clamp_tick(tick: int) -> int:
 
 class SimEngine:
     def __init__(self, book, value_process, traders, market_maker, portfolio,
-                 rng, arrival_rate: float, mm_update_rate: float) -> None:
+                 rng, arrival_rate: float, mm_update_rate: float,
+                 no_book=None) -> None:
+        # `book` is the YES book. `no_book` is optional: pass one and the same
+        # flow trades BOTH tokens, which is what coherence analysis needs.
+        # Without it everything behaves exactly as before.
         self.book = book
+        self.no_book = no_book
         self.value_process = value_process
         self.traders = traders
         self.market_maker = market_maker
@@ -60,6 +65,8 @@ class SimEngine:
         # Trade is then stamped with sim time at birth, which markout needs and
         # cannot reconstruct afterwards.
         self.book.clock = self._now
+        if self.no_book is not None:
+            self.no_book.clock = self._now
 
     def _now(self) -> float:
         return self.time
@@ -146,14 +153,27 @@ class SimEngine:
         '''
         order_id = next(self.order_ids)
 
+        # pick a token. a NO contract is worth (1 - p), so the informed
+        # trader's view has to be complemented for that book - otherwise it
+        # would trade NO as though it were YES and manufacture arbitrage.
+        target_book = self.book
+        is_no_book = False
+        if self.no_book is not None and self.rng.random() < 0.5:
+            target_book = self.no_book
+            is_no_book = True
+
         if isinstance(trader, InformedTrader):
             observed_p = self._observe(true_p, trader.signal_noise)
-            order = trader.generate_order(self.book, order_id, observed_p)
+            if is_no_book:
+                observed_p = 1.0 - observed_p
+            order = trader.generate_order(target_book, order_id, observed_p)
         else:
-            order = trader.generate_order(self.book, order_id)
+            order = trader.generate_order(target_book, order_id)
 
         if order is not None:
-            trades = self.book.submit(order)
+            trades = target_book.submit(order)
+            # the maker quotes the YES book only, so NO-book trades can never
+            # carry one of its ids and fall through _attribute harmlessly.
             self._attribute(trades)
 
         if reschedule:
@@ -263,7 +283,14 @@ class SimEngine:
             "realised_pnl": self.portfolio.realised_pnl,
             "unrealised_pnl": self.portfolio.unrealised_pnl(self.book),
             "n_trades": len(self.book.trades),
+            "no_best_bid": self._no_book_field("best_bid"),
+            "no_best_ask": self._no_book_field("best_ask"),
         })
+
+    def _no_book_field(self, name):
+        if self.no_book is None:
+            return None
+        return getattr(self.no_book, name)
 
     def to_frame(self):
         import pandas

@@ -1,139 +1,244 @@
 '''
 Markout and P&L decomposition.
 
-This file is what turns "my P&L fell" into "my P&L fell BECAUSE of adverse
-selection", which is the difference between CV bullet 2 being a claim and being
-a measurement.
+This is what turns "my P&L fell" into "my P&L fell BECAUSE of adverse
+selection". Without it, the flow experiment produces a number with no
+explanation attached.
 
 INPUTS, both produced by the engine with no extra work:
-    fills      - portfolio.fills, a list of (trade, our_side) pairs. trade.time
-                 is set because the engine lends the book its clock.
-    reference_series - [(time, micro_price)] pulled out of engine.log. Use
-                 micro_price, not mid: mid ignores queue imbalance, so a fill
-                 that happened precisely because the book was one-sided gets
-                 measured against a reference that cannot see that.
+    fills            - portfolio.fills, a list of (trade, our_side). trade.time
+                       is set because the engine lends the book its clock.
+    reference_series - [(time, micro_price)] from engine.log. Micro, not mid:
+                       mid ignores queue imbalance, so a fill that happened
+                       precisely because the book was one-sided would be
+                       measured against a reference that cannot see that.
 '''
 
 import bisect
+import math
 
-# markout horizons in SIM TIME units, not events. With resolve_time = 1.0 and
-# ~200 arrivals per unit time, 0.005 is roughly one event and 0.05 is roughly
-# ten. Short horizons show adverse selection; long ones drown in drift.
+# Horizons in SIM TIME, not events. With resolve_time 1.0 and ~200 arrivals per
+# unit time, 0.005 is about one event and 0.05 about ten. Short horizons show
+# temporary impact; settlement_markout below shows the permanent damage.
 DEFAULT_HORIZONS = (0.005, 0.02, 0.05)
 
 
-def reference_at(reference_series, time):
-    '''
-    The most recent reference at or before `time`, or None if there is none.
+def _times_of(reference_series):
+    times = []
+    for time, _ in reference_series:
+        times.append(time)
+    return times
 
-    bisect over a pre-sorted list, not a linear scan: markout calls this once
-    per fill per horizon, so a scan makes the whole analysis quadratic in a run
-    with a few thousand fills.
 
-    Step-function lookup (last known value), NOT interpolation. Interpolating
-    between two quotes invents a price that never existed, and near a news jump
-    it would smear the gap you are specifically trying to measure.
+def reference_at(reference_series, times, time, strict=False):
     '''
-    # times = [t for t, _ in reference_series] -- hoist this OUT of the loop in
-    # the callers below; rebuilding it per fill is the quadratic trap again.
-    # index = bisect.bisect_right(times, time) - 1
-    # if index < 0: return None
-    # return reference_series[index][1]
-    ...
+    The reference price as of `time`, or None if the run had not started.
+
+    Step-function lookup, NOT interpolation: interpolating invents a price that
+    never existed, and across a news jump it would smear out exactly the gap
+    being measured.
+
+    strict=True takes the last snapshot STRICTLY BEFORE `time`. This matters
+    more than it looks. The engine snapshots AFTER handling each event, so the
+    snapshot stamped at a fill's own timestamp already contains that fill's
+    impact - the sweep has eaten the quote and moved the touch. Measuring
+    spread capture against it would credit the maker with price impact caused
+    by the very trade that hurt it, and would hide the same move from the
+    adverse-selection term. Pre-trade for "where was the market when I traded",
+    post-trade for "where is it now".
+
+    `times` is passed in rather than rebuilt, because this is called once per
+    fill per horizon and rebuilding it here would make the analysis quadratic.
+    '''
+    if strict:
+        index = bisect.bisect_left(times, time) - 1
+    else:
+        index = bisect.bisect_right(times, time) - 1
+    if index < 0:
+        return None
+    return reference_series[index][1]
 
 
 def markout(fills, reference_series, horizons=DEFAULT_HORIZONS):
     '''
-    The signed price move after each fill, averaged per horizon.
+    Signed price move after each fill, quantity-weighted, per horizon.
 
         signed_move = (reference[t + h] - fill_price) * our_side.sign
 
-    Positive is good: the price moved our way after we traded. PERSISTENTLY
-    NEGATIVE AT SHORT HORIZONS IS ADVERSE SELECTION - the counterparty knew
-    something, and the price kept going the way they pushed it.
+    Positive is good. Measured from the FILL PRICE, so a passive fill starts
+    roughly one half-spread ahead; what matters is how that number DECAYS as
+    the horizon grows.
 
-    Returns {horizon: mean signed move in ticks}. Weight by quantity, not by
-    fill count: one 10-lot pickoff should not count the same as one 1-lot.
-
-    Skip fills with no reference at t+h (the run ended). Do NOT substitute the
-    last known price - that silently reports zero markout for exactly the fills
-    that happened closest to resolution, which are the most toxic ones.
+    Fills with no reference at t+h are SKIPPED, not substituted with the last
+    known price. Substituting reports zero markout for the fills closest to
+    resolution, which are the most toxic ones in the run.
     '''
-    # hoist the times list once
-    # for each horizon:
-    #     total_move = 0.0
-    #     total_quantity = 0
-    #     for trade, our_side in fills:
-    #         future = reference_at(...)   at trade.time + horizon
-    #         if future is None: continue
-    #         total_move += (future - trade.price) * our_side.sign * trade.quantity
-    #         total_quantity += trade.quantity
-    #     record total_move / total_quantity  (guard total_quantity == 0)
-    ...
+    times = _times_of(reference_series)
+    curve = {}
+
+    for horizon in horizons:
+        total_move = 0.0
+        total_quantity = 0
+
+        for trade, our_side in fills:
+            if trade.time is None:
+                continue
+            future = reference_at(reference_series, times, trade.time + horizon)
+            if future is None:
+                continue
+            total_move += (future - trade.price) * our_side.sign * trade.quantity
+            total_quantity += trade.quantity
+
+        if total_quantity == 0:
+            curve[horizon] = None
+        else:
+            curve[horizon] = total_move / total_quantity
+
+    return curve
 
 
-def decompose_pnl(fills, reference_series, total_pnl,
-                  horizon=0.05, fee_per_contract=0.0):
+def decompose_pnl(fills, reference_series, total_pnl, horizon=0.05,
+                  fee_per_contract=0.0):
     '''
     Split total P&L into four parts that SUM to it.
 
-        spread_capture    = (reference_at_fill - price) * sign * quantity
-                            summed. What you earned for providing liquidity:
-                            you bought below the reference or sold above it.
+        spread_capture    (reference_at_fill - price) * sign * qty
+        adverse_selection (reference[t+h] - reference[t]) * sign * qty
+        fees              -fee_per_contract * contracts
+        inventory         THE RESIDUAL - mark-to-market plus settlement
 
-        adverse_selection = (reference_at(t+h) - reference_at(t)) * sign * qty
-                            summed. How the reference itself moved after you
-                            traded. Negative means you were picked off.
+    Inventory is the residual deliberately. It forces the parts to sum to the
+    total by construction, so the decomposition can never quietly disagree with
+    the P&L it claims to explain. Computing all four independently and finding
+    they nearly add up is an afternoon lost to a rounding difference.
 
-        fees              = -fee_per_contract * total contracts
-
-        inventory         = the RESIDUAL. Mark-to-market on the position as the
-                            reference drifts, plus settlement.
-
-    Making inventory the residual is deliberate: it forces the four parts to
-    sum to the total by construction, so the decomposition can never quietly
-    disagree with the P&L it claims to explain. Computing all four
-    independently and finding they nearly add up is how you spend an afternoon
-    chasing a rounding difference.
-
-    Note the two terms are measured against the SAME reference at the SAME
-    instant, so they do not double count: spread capture is price versus
-    reference at t, adverse selection is reference at t versus reference at
-    t+h.
-
-    Returns a dict. Assert the four sum to total_pnl in the test.
+    The two measured terms do not double count: spread capture is price versus
+    reference AT the fill, adverse selection is reference at t versus t+h.
     '''
-    ...
+    times = _times_of(reference_series)
+
+    spread_capture = 0.0
+    adverse_selection = 0.0
+    contracts = 0
+
+    for trade, our_side in fills:
+        contracts += trade.quantity
+        if trade.time is None:
+            continue
+
+        now = reference_at(reference_series, times, trade.time, strict=True)
+        if now is None:
+            continue
+
+        spread_capture += (now - trade.price) * our_side.sign * trade.quantity
+
+        future = reference_at(reference_series, times, trade.time + horizon)
+        if future is None:
+            continue
+        adverse_selection += (future - now) * our_side.sign * trade.quantity
+
+    fees = -fee_per_contract * contracts
+    inventory = total_pnl - spread_capture - adverse_selection - fees
+
+    return {
+        "spread_capture": spread_capture,
+        "adverse_selection": adverse_selection,
+        "fees": fees,
+        "inventory": inventory,
+        "total": total_pnl,
+        "contracts": contracts,
+    }
+
+
+def settlement_markout(fills, outcome):
+    '''
+    Markout measured all the way to RESOLUTION, in ticks per contract.
+
+        (outcome * 100 - price) * sign
+
+    In a resolving market this is the honest long-horizon markout, and it
+    exists here in a way it cannot for equities: there is a terminal truth to
+    mark against.
+
+    WHY IT IS NEEDED alongside the short-horizon curve, and the most useful
+    thing the analysis layer found. An aggressive sweep displaces the touch, so
+    micro-price markout at one or ten events captures TEMPORARY impact, which
+    mean-reverts as noise traders refill the level. The information the
+    informed trader acted on is only fully revealed at settlement. Measuring
+    only short horizons therefore understates adverse selection badly in this
+    market structure: the damage is real but it does not show up in the mid
+    until the answer does.
+    '''
+    total = 0.0
+    quantity = 0
+    payoff = outcome * 100
+    for trade, our_side in fills:
+        total += (payoff - trade.price) * our_side.sign * trade.quantity
+        quantity += trade.quantity
+    if quantity == 0:
+        return None
+    return total / quantity
 
 
 def rms_inventory(log):
     '''
-    Root mean square position across the run. The risk half of the risk/return
-    frontier.
-
-    RMS, not mean: a maker that sits at +50 then -50 has a mean near zero and
-    has been carrying enormous risk the whole time.
+    Root mean square position. RMS, not mean: a maker that sits at +50 then -50
+    has a mean near zero and has been carrying enormous risk throughout.
     '''
-    ...
+    total = 0.0
+    count = 0
+    for row in log:
+        total += row["position"] ** 2
+        count += 1
+    if count == 0:
+        return 0.0
+    return math.sqrt(total / count)
 
 
 def edge_per_contract(total_pnl, fills):
-    '''
-    Total P&L divided by contracts traded. The return half of the frontier.
+    '''Per CONTRACT, not per fill.'''
+    contracts = 0
+    for trade, _ in fills:
+        contracts += trade.quantity
+    if contracts == 0:
+        return None
+    return total_pnl / contracts
 
-    Per CONTRACT, not per fill. Trading 1000 contracts badly and 10 well should
-    not look like a 50/50 split.
-    '''
-    ...
 
-
-def summarise(engine, fee_per_contract=0.0):
+def summarise(engine, fee_per_contract=0.0, horizons=DEFAULT_HORIZONS):
     '''
-    One call the experiments notebook can use per run.
+    One call per run for the sweeps. Returns a flat dict so a list of these
+    goes straight into a DataFrame.
 
-    Pull reference_series out of engine.log, skipping rows where micro_price is
-    None (the book was one-sided). Return a flat dict of every number above
-    plus the markout curve, so a sweep is just a list of these fed to a
-    DataFrame.
+    Rows with micro_price None are dropped: the book was one-sided and there
+    was no reference to measure against.
     '''
-    ...
+    reference_series = []
+    for row in engine.log:
+        if row["micro_price"] is not None:
+            reference_series.append((row["time"], row["micro_price"]))
+
+    fills = engine.portfolio.fills
+    total_pnl = engine.portfolio.realised_pnl
+    if engine.value_process.outcome is None:
+        raise ValueError("summarise expects a resolved market; run past resolve_time")
+
+    curve = markout(fills, reference_series, horizons)
+    parts = decompose_pnl(fills, reference_series, total_pnl,
+                          fee_per_contract=fee_per_contract)
+
+    summary = {
+        "total_pnl": total_pnl,
+        "fills": len(fills),
+        "contracts": parts["contracts"],
+        "spread_capture": parts["spread_capture"],
+        "adverse_selection": parts["adverse_selection"],
+        "inventory": parts["inventory"],
+        "rms_inventory": rms_inventory(engine.log),
+        "edge_per_contract": edge_per_contract(total_pnl, fills),
+        "trades_in_book": len(engine.book.trades),
+        "settlement_markout": settlement_markout(fills, engine.value_process.outcome),
+    }
+    for horizon in horizons:
+        summary["markout_" + str(horizon)] = curve[horizon]
+    return summary

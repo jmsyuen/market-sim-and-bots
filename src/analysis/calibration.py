@@ -46,6 +46,10 @@ def log_loss(probabilities, outcomes, epsilon=EPSILON):
 
 def reliability(probabilities, outcomes, bins=10):
     '''
+    DEFERRED - not needed today. No CV bullet mentions a reliability curve, and
+    Brier plus log loss carry the claim on their own. Build it when the plots
+    go into the README.
+
     Bin the forecasts and compare predicted to realised frequency.
 
     Returns a list of (bin_centre, mean_predicted, empirical_frequency, count)

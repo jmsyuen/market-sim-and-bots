@@ -1,13 +1,12 @@
 '''
 The market maker.
 
-Everything here is a layer on top of the previous one, and each layer is a
-separate experiment. Build them in order and measure after each: a feature you
-cannot show a number for is a claim, not a result.
+each layer relies on the previous, and is a separate experiment
+
 
     0. fair value          where to centre the quotes
-    1. cost floor          the minimum spread that is not a donation
-    2. inventory skew      shift BOTH quotes to push position back to zero
+    1. cost floor          the minimum spread taking into account fees
+    2. inventory skew      shift BOTH quotes to push position back to zero (directional risk)
     3. volatility scaling  wider when the price is moving
     4. event awareness     wider or absent near news and near resolution
     5. position limits     stop quoting the side that grows the position

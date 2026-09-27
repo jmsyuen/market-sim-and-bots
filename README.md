@@ -103,7 +103,7 @@ micro-price - uses imbalance to estimate fair value (weighted imbalance) - heavy
 micro = I·P_ask + (1 − I)·P_bid = P_bid + I·spread
 AS Avellaneda Stoikov micro price model also models how imbalance predicts future mid
 
-posterior mean - a point estimate after observing data, between prior beliefs and observed evidence - simplified, a weighted average of prior mean and sample data mean based on confidence
+posterior mean - a point estimate after observing data, between prior beliefs and observed evidence - simplified, it is a weighted average of prior mean and sample data mean based on confidence
 (weights determined by the precision (inverse variance) or effective sample size of the prior and the data)
 In the clean conjugate-normal case: posterior mean = (μ_prior/σ²_prior + μ_evidence/σ²_evidence) / (1/σ²_prior + 1/σ²_evidence)
 

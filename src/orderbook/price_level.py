@@ -20,7 +20,9 @@
 
 
 class PriceLevel:
-    """FIFO queue at one price. head = oldest = fills first, tail = newest."""
+    """FIFO queue at one price. head = oldest, fills first, tail = newest.
+        (price time priority)
+        """
 
     # fixed shape and high cardinality, so slots pays here for the same reason
     # it pays on Trade.
@@ -42,7 +44,7 @@ class PriceLevel:
         return self.head
 
     def append(self, order) -> None:
-        """Enqueue at the back. Newest last is what time priority means."""
+        
         order.prev = self.tail
         order.next = None
 
@@ -62,10 +64,7 @@ class PriceLevel:
         backward chain silently rots. Every example test would still pass. That
         is why book.assert_invariants walks the list in both directions.
         """
-        # deque.remove() raised ValueError on a missing element. intrusive
-        # removal has no such protection - it would happily corrupt two lists -
-        # so the check is re-created here.
-        #
+        
         # this catches the realistic bug, which is removing an order that was
         # already removed: both its pointers are None and it is not the head.
         # it does NOT catch passing an order that is interior to a DIFFERENT
@@ -86,9 +85,6 @@ class PriceLevel:
         else:
             order.next.prev = order.prev
 
-        # clear the pointers so a stale Order reference cannot be spliced back
-        # into a list and duplicate itself, and so the already-removed check
-        # above keeps working.
         order.prev = None
         order.next = None
         self.count -= 1

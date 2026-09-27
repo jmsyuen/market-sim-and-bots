@@ -17,6 +17,103 @@ No engine changes are needed for anything in this guide.
 
 ---
 
+## 0. Interfaces you will call
+
+Everything below already exists and is tested. Nothing here needs changing.
+
+### `OrderBook` — what the strategy reads
+
+| | returns | note |
+|---|---|---|
+| `book.best_bid` / `book.best_ask` | `int \| None` | `None` when that side is empty |
+| `book.mid` | `float \| None` | `(bid + ask) / 2` |
+| `book.spread` | `int \| None` | |
+| `book.micro_price` | `float \| None` | `bid + imbalance * (ask - bid)`; heavy bids sit near the ask |
+| `book.size_at(side, price)` | `int` | `0` if the level is empty |
+| `book.depth(levels=5)` | `{Side.BUY: [(price, size)], Side.SELL: [...]}` | best-first; coherence needs this |
+| `book.trades` | `list[Trade]` | every fill the book has produced |
+
+**Every one of the first four can be `None`.** A one-sided or empty book is normal early in
+a run, and the maker is called before flow has built anything.
+
+The strategy never calls `submit` or `cancel` — the engine does that. You return ticks; it
+handles orders.
+
+### `Order`, `Side`, `Trade` — for tests
+
+`Order` is keyword-only: `Order(id=, side=, quantity=, price=None, type=OrderType.LIMIT,
+tif=TimeInForce.GTC, trader_id=None)`. `price` must be an `int` in 1–99 for limits and
+`None` for markets.
+
+`Side.BUY` / `Side.SELL`, with `.opposite` and `.sign` (`+1` / `-1`). `.sign` is what makes
+P&L arithmetic side-agnostic.
+
+`Trade` is frozen: `price`, `quantity`, `maker_id`, `taker_id`, `seq`, `taker_side`, `time`.
+`taker_side` is the side of the *aggressor*, which for a passive fill is the opposite of
+yours.
+
+### `Portfolio` — what the maker reads, and what metrics consumes
+
+| | |
+|---|---|
+| `portfolio.position` | `int`, positive long YES |
+| `portfolio.avg_cost` | `float`, volume-weighted, in ticks |
+| `portfolio.realised_pnl` | `float`, ticks × contracts |
+| `portfolio.cash` | `float` |
+| `portfolio.fills` | `list[(Trade, our_side)]` — the input to markout |
+| `portfolio.unrealised_pnl(book)` | `float \| None` — `None` if the exit side is empty |
+| `portfolio.total_pnl(book)` | `float \| None` |
+
+The maker only needs `position`. Everything else is for the analysis layer.
+
+### `ValueProcess` — what the maker may and may not touch
+
+**May read:** `scheduled_news_times` (a tuple of floats), `decision_time`, `resolve_time`.
+
+**Must never read:** `x`, `p`, `tick_price`, `outcome`, `_news_events`.
+
+The maker is constructed with the *tuple*, never the object. If a `ValueProcess` is in
+scope inside `market_maker.py`, that is the bug.
+
+### `SimEngine` — the contract your maker must satisfy
+
+The engine requires exactly three attributes and one method:
+
+```python
+maker.trader_id      # int, distinct from every trader
+maker.resting_ids    # set, the engine adds to and clears it
+maker.recent_ids     # set, the engine adds to and clears it
+maker.quotes(book, portfolio, time)   # -> (bid, ask, size) or None
+```
+
+`bid` or `ask` may individually be `None`. Both `None` — return `None` for the whole thing.
+
+For experiments: `engine.run(until)`, `engine.log` (one dict per event),
+`engine.to_frame()` (pandas). Each log row has `time`, `true_p`, `best_bid`, `best_ask`,
+`mid`, `micro_price`, `position`, `cash`, `realised_pnl`, `unrealised_pnl`, `n_trades`.
+
+### `FairValue` — the contract the maker expects
+
+`fair_value.py` is yours to write, but the maker consumes it, so fix the interface now:
+
+```python
+fair_value.value(book)                # -> float in TICKS (1..99), or None
+fair_value.probability(book)          # -> float in (0,1); value(book) / 100
+fair_value.observe(trade, our_side)   # optional: fold a fill into the posterior
+```
+
+**Units are the trap.** `micro_price` is in ticks, so `value()` must be in ticks for the
+two to be swappable inside `_reference`. Calibration wants probabilities, hence the second
+method. Convert at the boundary; do not let both float around the file.
+
+Bayesian shape, for CV bullet 3: hold `Beta(a, b)` with the mean set from the micro-price
+prior and `a + b` as prior strength. A buy that looks informed adds to `a`, a sell to `b`,
+weighted by how informative the flow looks. Posterior mean `a / (a + b)` is the fair value.
+That is a precision-weighted blend, not a simple average — which is the thing the bullet is
+claiming and the thing you will be asked to explain.
+
+---
+
 ## 1. Fair value, and the abstraction boundary
 
 ### Write
@@ -93,7 +190,11 @@ attribute an effect to either.
   inverts.
 - `risk_aversion = 0` must reproduce the control exactly. Assert it.
 
-### Measure
+### Measure — DEFERRED, not needed today
+
+The bullet claims inventory skew *exists*, not that a frontier was measured, so the sweep
+below is not required for the CV. Tests 3, 4 and 5 are what make the claim true. Do this
+when there is a free evening.
 
 **The risk/return frontier.** Sweep `risk_aversion` across roughly `[0, 0.01, 0.05, 0.1,
 0.5, 1.0]`, 40+ seeds each, holding everything else fixed. Record RMS inventory and edge per
@@ -101,7 +202,6 @@ share (realised P&L divided by contracts traded).
 
 Expect: RMS inventory falls steeply, edge per share is flat then falls, and there's a
 visible optimum before it turns negative. Plot both against `risk_aversion` on one chart.
-That plot is CV bullet 3.
 
 The baseline peak inventory is around 50 with no skew, so there's plenty of room for this to
 show a large effect.
@@ -142,7 +242,17 @@ reacting and the half-life is too long.
 
 ---
 
-## 5. Event awareness — where this project is distinctive
+## 5. Event awareness — DEFERRED IN FULL
+
+**Skipped for now, code and experiment both.** No CV bullet claims news awareness, so
+building the widening logic without running the experiment is pure cost. Leave
+`_near_scheduled_news` unimplemented and `news_buffer` / `resolution_sensitivity` at their
+defaults of zero, which makes both terms vanish from `_half_spread`.
+
+This is the most distinctive thing in the project and the first thing to add back. Nobody
+else's order book project has it, because it needs a latent value with jumps, a
+public/private information split, and a maker that can act on one but not the other. The
+full design is below, unchanged, for when you return to it.
 
 ### Write
 
@@ -164,10 +274,9 @@ entirely.
   risk really does go to infinity — but cap it or the clamp does something arbitrary for
   you. A linear ramp is easier to explain.
 
-### Measure
+### Measure — DEFERRED
 
-**The asymmetry experiment, and the best single result in the project.** Three
-configurations, same seeds, same total news intensity:
+**The asymmetry experiment.** Three configurations, same seeds, same total news intensity:
 
 | | news | maker knows timing |
 |---|---|---|
@@ -184,7 +293,13 @@ public/private information split, and a maker that can act on one but not the ot
 
 ---
 
-## 6. Position limits
+## 6. Position limits — DEFERRED
+
+**Skipped for now.** No bullet claims a position cap, and with skew working the cap should
+rarely bind anyway. Leave `_may_quote` unimplemented and never suppress a leg; the engine
+supports `None` legs whenever you come back to this.
+
+Design, for later:
 
 ### Write
 
@@ -210,7 +325,7 @@ the body roughly unchanged. If the body moves, the cap is binding too often.
 
 ## 7. Tests — `tests/test_market_maker.py`
 
-Ten. The maker isn't correct or incorrect, so these assert *mechanisms*, not outcomes.
+Eight for today; tests 9, 10 and 11 go with the deferred sections.
 
 **Reproducing the control**
 1. All features off gives the same quotes as `FixedSpreadMaker` at the same
@@ -231,31 +346,29 @@ Ten. The maker isn't correct or incorrect, so these assert *mechanisms*, not out
    rates and assert the estimates agree within tolerance. **Load-bearing** — this is the
    `√Δt` bug, and it's silent.
 
-**Events and limits**
-9. Half-spread inside `news_buffer` of a scheduled time exceeds the half-spread outside it.
-10. At `+max_position` the bid is `None` and the ask is not; at `−max_position` the reverse.
-
-**One structural test worth adding**
-11. `inspect.getsource(MarketMaker)` contains no `best_bid`, `best_ask` or `micro_price`
-    outside `_reference`. Ugly, but it pins the abstraction boundary, and that boundary is
-    a thing an interviewer may well probe.
+**DEFERRED with their sections**
+9. ~~Half-spread inside `news_buffer` exceeds the half-spread outside it.~~
+10. ~~At `+max_position` the bid is `None` and the ask is not.~~
+11. ~~`inspect.getsource` contains no `best_bid` outside `_reference`.~~ Worth adding
+    eventually; the abstraction boundary is a thing an interviewer may probe.
 
 ---
 
-## 8. Order of work
+## 8. Order of work — TODAY
 
-1. `_reference`, `quotes()` assembly with everything off → tests 1, 2
-2. Skew, constant `vol`, no `(T−t)` → tests 3, 4, 5
-3. Sweep `risk_aversion` → **the frontier plot, CV bullet 3**
+The scope below is what CV bullet 3 actually claims: the features exist and are correct.
+
+1. `fair_value.py` first — Beta posterior, micro-price prior. 40 min.
+2. `_reference`, `quotes()` assembly with everything off → tests 1, 2
+3. Skew, constant `vol`, `(T−t)` hard-coded to 1.0 → tests 3, 4, 5
 4. Volatility estimator → tests 7, 8
 5. Add `vol²` and `(T−t)` into the skew → test 6
-6. News and resolution widening → test 9
-7. Position limits → test 10
-8. The asymmetry experiment → **the distinctive result**
 
-Steps 1 to 3 give you a complete CV bullet. If exams take the rest of the week, stop there
-and write it up — a measured frontier with a visible optimum beats four half-built features
-with no numbers.
+Then leave this file and move to `metrics.py`. Deferred: the `risk_aversion` sweep, news
+and resolution widening, position limits, and the asymmetry experiment.
+
+If something has to give inside this list, give up step 5 — the skew works without the
+time-decay term, and nothing in the bullet mentions it.
 
 ---
 

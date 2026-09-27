@@ -60,15 +60,16 @@ class BinaryMarket:
 
 
 # ----------------------------------------------------------------------
-# OPTIONAL, and probably to be skipped: mint and merge
+# DEFERRED - mint and merge. DO NOT BUILD TODAY.
 # ----------------------------------------------------------------------
 # On a real venue you can deposit 100 ticks of collateral and MINT one YES plus
 # one NO, or MERGE a matched pair back into 100 ticks. That is what makes the
 # arbitrage physically executable rather than just observable.
 #
 # Implementing it means collateral accounting in the portfolio and a new order
-# path, and it changes nothing about the DETECTION in coherence.py. Detection
-# alone supports the CV bullet as written.
+# path, and it changes nothing about the DETECTION in coherence.py. The CV
+# bullet says "detected coherence arbitrage at executable prices" - detection
+# is the whole claim, and executable refers to walking real depth net of fees,
+# not to being able to mint.
 #
-# Build this only if everything else is finished. It is a genuine extension,
-# not a missing piece.
+# A genuine extension, not a missing piece.

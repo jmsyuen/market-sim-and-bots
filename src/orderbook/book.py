@@ -21,7 +21,7 @@ _GLOBAL_SEQ = count(1)
 class OrderBook:
     """One side-paired book of resting orders. Owns the never-crossed invariant."""
 
-    def __init__(self, seq_source=None) -> None:
+    def __init__(self, seq_source=None, clock=None) -> None:
         # tick -> PriceLevel.
         #
         # SortedDict: needs cheap best-price access AND cheap cancel of an
@@ -61,6 +61,12 @@ class OrderBook:
         # construction site and every test that reads trades.
         self.trades: list[Trade] = []
 
+        # the book has no clock of its own. the engine lends it one - a callable
+        # returning sim time - so every Trade is stamped at birth. markout needs
+        # that stamp and cannot reconstruct it afterwards. defaults to None, so
+        # a book used without an engine behaves exactly as it did before.
+        self.clock = clock
+
         if seq_source is not None:
             self._seq_source = seq_source
         else:
@@ -74,6 +80,11 @@ class OrderBook:
     def _next_seq(self) -> int:
         # a monotonic integer, not a timestamp.
         return next(self._seq_source)
+
+    def _now(self) -> float | None:
+        if self.clock is None:
+            return None
+        return self.clock()
         
 
     def _book_for(self, side: Side) -> SortedDict:
@@ -306,6 +317,7 @@ class OrderBook:
                 taker_id=order.id,
                 seq=self._next_seq(),
                 taker_side=order.side,
+                time=self._now(),      # None unless an engine lent us a clock
             )
 
             order.fill(quantity)        # Order.fill owns the
